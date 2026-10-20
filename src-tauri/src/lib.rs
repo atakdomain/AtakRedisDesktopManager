@@ -21,7 +21,11 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let dir = app.path().app_config_dir()?;
+            // Taşınabilir kullanım ve uçtan uca testler için yapılandırma klasörü değiştirilebilir
+            let dir = match std::env::var_os("ATAK_RDM_CONFIG_DIR") {
+                Some(dir) => std::path::PathBuf::from(dir),
+                None => app.path().app_config_dir()?,
+            };
             std::fs::create_dir_all(&dir)?;
             app.manage(AppState {
                 store: store::Store::load(dir)?,
@@ -50,6 +54,7 @@ pub fn run() {
             commands::keys::key_create,
             commands::keys::key_delete,
             commands::keys::key_rename,
+            commands::keys::key_copy,
             commands::keys::key_expire,
             commands::values::string_get,
             commands::values::string_set,

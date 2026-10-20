@@ -166,6 +166,32 @@ async fn legacy_paths_without_keepttl_and_unlink() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
+async fn key_copy_keeps_ttl_and_respects_existing_target() {
+    let s = open(config(6390)).await;
+    fresh_db(&s).await;
+    s.query_key::<Value>(DB, b"src", redis::cmd("SET").arg("src").arg("v").arg("PX").arg(60_000)).await.unwrap();
+    s.key_copy(DB, b"src", b"dst", false).await.unwrap();
+    assert_eq!(s.string_get(DB, b"dst").await.unwrap().value, rb("v"));
+    assert!(s.key_info(DB, b"dst").await.unwrap().ttl > 0);
+    assert_eq!(s.key_copy(DB, b"src", b"dst", false).await.unwrap_err().kind, ErrorKind::Exists);
+    s.string_set(DB, b"src", b"w").await.unwrap();
+    s.key_copy(DB, b"src", b"dst", true).await.unwrap();
+    assert_eq!(s.string_get(DB, b"dst").await.unwrap().value, rb("w"));
+    assert_eq!(s.key_copy(DB, b"missing", b"x", false).await.unwrap_err().kind, ErrorKind::NotFound);
+    dispose(s).await;
+
+    let c = open(cluster_config()).await;
+    c.key_delete(0, vec![rb("copy:a"), rb("copy:b")]).await.unwrap();
+    c.query_key::<Value>(0, b"copy:a", redis::cmd("SET").arg("copy:a").arg("1")).await.unwrap();
+    assert_ne!(key_slot(b"copy:a"), key_slot(b"copy:b"));
+    c.key_copy(0, b"copy:a", b"copy:b", false).await.unwrap();
+    assert_eq!(c.string_get(0, b"copy:b").await.unwrap().value, rb("1"));
+    c.key_delete(0, vec![rb("copy:a"), rb("copy:b")]).await.unwrap();
+    dispose(c).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn binary_keys_and_values_round_trip() {
     let s = open(config(6390)).await;
     fresh_db(&s).await;

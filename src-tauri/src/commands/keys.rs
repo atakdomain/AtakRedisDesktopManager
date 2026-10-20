@@ -39,6 +39,20 @@ pub async fn key_rename(
     session.key_rename(db, key.as_slice(), new_key.as_slice(), overwrite).await
 }
 
+/// Aynı veritabanında yeni ada kopya (TTL korunur)
+#[tauri::command]
+pub async fn key_copy(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: u32,
+    key: RBytes,
+    new_key: RBytes,
+    overwrite: bool,
+) -> AppResult<()> {
+    let session = state.sessions.get(&state.store, &connection_id).await?;
+    session.key_copy(db, key.as_slice(), new_key.as_slice(), overwrite).await
+}
+
 #[tauri::command]
 pub async fn key_expire(state: State<'_, AppState>, connection_id: String, db: u32, key: RBytes, ttl_ms: i64) -> AppResult<()> {
     state.sessions.get(&state.store, &connection_id).await?.key_expire(db, key.as_slice(), ttl_ms).await

@@ -47,6 +47,8 @@ export class Workspace {
   private keys: RBytes[] = [];
   private byId = new Map<string, RBytes>();
   private version = $state(0);
+  /** Liste yalnızca sona eklemeyle değil yerinde değişince artar (yeni arama, silme, yeniden adlandırma) */
+  private listEpoch = 0;
 
   private meta = new Map<string, KeyMeta>();
   private metaVersion = $state(0);
@@ -83,6 +85,12 @@ export class Workspace {
   get keyCount(): number {
     void this.version;
     return this.keys.length;
+  }
+
+  /** Artımlı görünümler (anahtar ağacı) için: değişmediyse `keyList` yalnızca sona ekleme almıştır. */
+  get keyListEpoch(): number {
+    void this.version;
+    return this.listEpoch;
   }
 
   keyById(id: string): RBytes | undefined {
@@ -135,6 +143,7 @@ export class Workspace {
     this.byId.clear();
     this.meta.clear();
     this.metaVersion++;
+    this.listEpoch++;
     this.version++;
     this.selection = new Set();
     this.allMatching = false;
@@ -248,6 +257,7 @@ export class Workspace {
     this.tabs = this.tabs.filter((t) => !(t.kind === "key" && t.key && gone.has(bytesId(t.key))));
     if (!this.tabs.some((t) => t.id === this.activeTabId)) this.activeTabId = this.tabs.at(-1)?.id ?? null;
     this.scan.matched = this.keys.length;
+    this.listEpoch++;
     this.version++;
     this.metaVersion++;
   }
@@ -259,12 +269,21 @@ export class Workspace {
     if (index >= 0) {
       if (this.byId.has(newId)) this.keys.splice(index, 1);
       else this.keys[index] = newKey;
+      this.byId.set(newId, newKey);
     }
     this.byId.delete(oldId);
-    this.byId.set(newId, newKey);
     const meta = this.meta.get(oldId);
     this.meta.delete(oldId);
     if (meta) this.meta.set(newId, meta);
+    if (this.selection.has(oldId)) {
+      const next = new Set(this.selection);
+      next.delete(oldId);
+      next.add(newId);
+      this.selection = next;
+    }
+    if (this.anchor === oldId) this.anchor = newId;
+    // Üzerine yazılan hedefin açık sekmesi artık eski içeriği gösterir
+    this.tabs = this.tabs.filter((t) => t.id !== keyTabId(newKey));
     for (const tab of this.tabs) {
       if (tab.kind === "key" && tab.key && bytesId(tab.key) === oldId) {
         tab.key = newKey;
@@ -273,6 +292,7 @@ export class Workspace {
         if (this.activeTabId === keyTabId(oldKey)) this.activeTabId = tab.id;
       }
     }
+    this.listEpoch++;
     this.version++;
     this.metaVersion++;
   }

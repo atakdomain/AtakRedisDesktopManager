@@ -1,6 +1,6 @@
 // Tarayıcıda (`bun run dev`, Tauri dışı) arayüzü denemek için bellek içi sahte arka uç.
 // Gerçek davranışın kaba bir benzeri; üretim paketine girmez.
-import { bytesId, label, toBytes } from "./bytes";
+import { bytesId, fromBytes, label, toBytes } from "./bytes";
 import type { Transport } from "./index";
 import type {
   ArdmScan,
@@ -18,6 +18,7 @@ import type {
   ZEntry,
 } from "./types";
 import { compileMatcher } from "$lib/util/match";
+import { tokenize } from "$lib/features/console/parse";
 
 type Value = RBytes | HashEntry[] | RBytes[] | ZEntry[] | StreamEntry[];
 
@@ -102,7 +103,7 @@ let connections: ConnectionConfig[] = [
   conn("c-local", "Yerel geliştirme", "127.0.0.1", 6379, { env: "local", group: "" }),
   conn("c-stage", "Hazırlık cluster", "10.20.0.11", 7000, { env: "staging", group: "Atak", mode: "cluster" }),
   conn("c-prod", "Canlı önbellek", "redis.prod.internal", 6379, { env: "production", group: "Atak", readOnly: false, ssh: true }),
-];
+].map((c, order) => ({ ...c, order }));
 
 function conn(id: string, name: string, host: string, port: number, extra: { env: ConnectionConfig["env"]; group: string; mode?: ConnectionConfig["mode"]; readOnly?: boolean; ssh?: boolean }): ConnectionConfig {
   return {
@@ -123,12 +124,62 @@ function conn(id: string, name: string, host: string, port: number, extra: { env
     sentinel: { masterName: "mymaster", sentinelUsername: "", sentinelPassword: "" },
     tls: { enabled: false, caPath: "", certPath: "", keyPath: "", skipVerify: false, serverName: "" },
     ssh: { enabled: extra.ssh ?? false, host: extra.ssh ? "bastion.example.com" : "", port: 22, username: "deploy", auth: "privateKey", password: "", privateKeyPath: "~/.ssh/id_ed25519", passphrase: "", timeoutSec: 30 },
-    order: connections?.length ?? 0,
+    order: 0,
     importedFrom: "",
   };
 }
 
 const cancelled = new Set<string>();
+
+// ───────────── konsol / pub-sub yardımcıları ─────────────
+
+const MOCK_WRITES = new Set(["SET", "DEL", "FLUSHDB", "FLUSHALL", "HSET", "LPUSH", "RPUSH", "SADD", "ZADD", "EXPIRE", "RENAME", "INCR"]);
+const mockSubs = new Map<string, { connectionId: string; channels: string[]; patterns: string[]; emit: (e: unknown) => void }>();
+const mockMonitors = new Map<string, (line: string) => void>();
+
+function mockPublish(connectionId: string, channel: string, payload: string): number {
+  let delivered = 0;
+  for (const sub of mockSubs.values()) {
+    if (sub.connectionId !== connectionId) continue;
+    if (sub.channels.includes(channel)) {
+      sub.emit({ channel, pattern: "", payload, atMs: Date.now() });
+      delivered++;
+    }
+    for (const pattern of sub.patterns) {
+      if (!compileMatcher({ mode: "glob", term: pattern, caseSensitive: true }).test(channel)) continue;
+      sub.emit({ channel, pattern, payload, atMs: Date.now() });
+      delivered++;
+    }
+  }
+  return delivered;
+}
+
+const mockConfig = [
+  ["maxmemory", "2147483648"],
+  ["maxmemory-policy", "allkeys-lru"],
+  ["maxclients", "10000"],
+  ["databases", "16"],
+  ["timeout", "0"],
+  ["tcp-keepalive", "300"],
+  ["save", "3600 1 300 100 60 10000"],
+  ["appendonly", "no"],
+  ["appendfsync", "everysec"],
+  ["slowlog-log-slower-than", "10000"],
+  ["slowlog-max-len", "128"],
+  ["notify-keyspace-events", ""],
+  ["hz", "10"],
+  ["lazyfree-lazy-eviction", "no"],
+  ["requirepass", ""],
+  ["bind", "127.0.0.1 -::1"],
+].map(([name, value]) => ({ name, value }));
+
+function fakeClients(): string {
+  const cmds = ["get", "hgetall", "client|list", "ping", "subscribe", "blpop", "set", "xreadgroup"];
+  return Array.from({ length: 24 }, (_, i) => {
+    const name = i % 3 === 0 ? `worker-${i}` : i % 5 === 0 ? "web" : "";
+    return `id=${i + 3} addr=10.0.${i % 4}.${10 + i}:${51000 + i * 7} laddr=127.0.0.1:6379 fd=${8 + i} name=${name} age=${(i + 1) * 431} idle=${i % 7 === 0 ? 0 : i * 13} flags=${i % 6 === 4 ? "P" : "N"} db=${i % 3} sub=0 psub=0 multi=-1 cmd=${cmds[i % cmds.length]} user=default`;
+  }).join("\n");
+}
 
 function page<T>(items: T[], cursor: string, count: number, filter: KeyFilter, text: (x: T) => string) {
   const matcher = compileMatcher(filter);
@@ -245,6 +296,12 @@ const handlers: Record<string, Handler> = {
     store.delete(bytesId(key));
     store.set(bytesId(newKey), { ...e, key: newKey });
   },
+  key_copy: ({ connectionId, db: dbIndex, key, newKey, overwrite }) => {
+    const store = db(connectionId, dbIndex);
+    const e = need(connectionId, dbIndex, key);
+    if (!overwrite && live(store, bytesId(newKey))) fail("exists", "target key already exists");
+    store.set(bytesId(newKey), { ...structuredClone(e), key: newKey });
+  },
   key_expire: ({ connectionId, db: dbIndex, key, ttlMs }) => {
     const e = need(connectionId, dbIndex, key);
     e.expireAt = ttlMs > 0 ? Date.now() + ttlMs : -1;
@@ -278,7 +335,7 @@ const handlers: Record<string, Handler> = {
   list_push: ({ connectionId, db: dbIndex, key, values, tail }) => {
     const items = need(connectionId, dbIndex, key).value as RBytes[];
     if (tail) items.push(...values);
-    else items.unshift(...values);
+    else for (const v of values) items.unshift(v); // LPUSH a b → [b, a, …]
     return items.length;
   },
   list_delete: ({ connectionId, db: dbIndex, key, indexes }) => {
@@ -345,68 +402,196 @@ const handlers: Record<string, Handler> = {
 
   console_exec: async ({ connectionId, db: dbIndex, line }) => {
     const started = performance.now();
-    const [cmd = "", ...args] = line.trim().split(/\s+/);
+    const { tokens, error } = tokenize(line);
+    if (error) fail("invalid", "Invalid argument(s)");
+    const [cmd = "", ...args] = tokens;
+    const upper = cmd.toUpperCase();
     const store = db(connectionId, dbIndex);
+    if (connections.find((c) => c.id === connectionId)?.readOnly && MOCK_WRITES.has(upper)) fail("readOnly", `${upper}: bağlantı salt okunur`);
+    for (const emit of mockMonitors.values()) emit(`${(Date.now() / 1000).toFixed(6)} [${dbIndex} 127.0.0.1:50001] ${tokens.map((x) => JSON.stringify(x)).join(" ")}`);
+    const str = (v: RBytes): RValue => ({ t: "str", v });
+    const entry = () => live(store, bytesId(args[0] ?? ""));
+    const wrongType: RValue = { t: "err", v: "WRONGTYPE Operation against a key holding the wrong kind of value" };
     let value: RValue;
-    switch (cmd.toUpperCase()) {
+    switch (upper) {
       case "PING":
-        value = { t: "status", v: "PONG" };
+        value = args[0] !== undefined ? str(args[0]) : { t: "status", v: "PONG" };
+        break;
+      case "ECHO":
+        value = str(args[0] ?? "");
         break;
       case "DBSIZE":
         value = { t: "int", v: store.size };
         break;
       case "GET": {
-        const e = live(store, args[0] ?? "");
-        value = e ? { t: "str", v: e.value as RBytes } : { t: "nil" };
+        const e = entry();
+        value = !e ? { t: "nil" } : e.type === "string" ? str(e.value as RBytes) : wrongType;
         break;
       }
       case "SET":
         put(store, args[0], "string", args[1] ?? "");
         value = { t: "status", v: "OK" };
         break;
-      case "KEYS":
-        value = { t: "arr", v: [...store.values()].slice(0, 50).map((e) => ({ t: "str", v: e.key }) as RValue) };
+      case "DEL":
+        value = { t: "int", v: args.filter((k) => store.delete(bytesId(k))).length };
         break;
+      case "EXISTS":
+        value = { t: "int", v: args.filter((k) => live(store, bytesId(k))).length };
+        break;
+      case "TYPE":
+        value = { t: "status", v: entry()?.type ?? "none" };
+        break;
+      case "TTL": {
+        const ms = ttlOf(entry());
+        value = { t: "int", v: ms < 0 ? ms : Math.ceil(ms / 1000) };
+        break;
+      }
+      case "KEYS": {
+        const matcher = compileMatcher({ mode: "glob", term: args[0] ?? "*", caseSensitive: true });
+        value = { t: "arr", v: [...store.values()].filter((e) => matcher.test(textOf(e.key))).map((e) => str(e.key)) };
+        break;
+      }
+      case "SCAN": {
+        const all = [...store.values()];
+        const from = Number(args[0]) || 0;
+        const next = from + 10 >= all.length ? 0 : from + 10;
+        value = { t: "arr", v: [str(String(next)), { t: "arr", v: all.slice(from, from + 10).map((e) => str(e.key)) }] };
+        break;
+      }
       case "SELECT":
         return { value: { t: "status", v: "OK" }, db: Number(args[0]) || 0, elapsedMs: 0.1 };
       case "HGETALL": {
-        const e = live(store, args[0] ?? "");
-        value = { t: "arr", v: ((e?.value as HashEntry[]) ?? []).flatMap((x) => [{ t: "str", v: x.field } as RValue, { t: "str", v: x.value } as RValue]) };
+        const e = entry();
+        value = e && e.type !== "hash" ? wrongType : { t: "arr", v: ((e?.value as HashEntry[]) ?? []).flatMap((x) => [str(x.field), str(x.value)]) };
         break;
       }
+      case "LRANGE":
+      case "SMEMBERS": {
+        const e = entry();
+        value = { t: "arr", v: ((e?.value as RBytes[]) ?? []).slice(0, 200).map(str) };
+        break;
+      }
+      case "ZRANGE": {
+        const items = (entry()?.value as ZEntry[]) ?? [];
+        const scores = args.some((a) => a.toUpperCase() === "WITHSCORES");
+        value = { t: "arr", v: items.flatMap((z) => (scores ? [str(z.member), str(String(z.score))] : [str(z.member)])) };
+        break;
+      }
+      case "ZSCORE": {
+        const z = ((entry()?.value as ZEntry[]) ?? []).find((x) => textOf(x.member) === args[1]);
+        value = z ? { t: "dbl", v: z.score } : { t: "nil" };
+        break;
+      }
+      case "XRANGE": {
+        const items = (entry()?.value as StreamEntry[]) ?? [];
+        value = { t: "arr", v: items.map((x) => ({ t: "arr", v: [str(x.id), { t: "arr", v: x.fields.flatMap((f) => [str(f.field), str(f.value)]) }] }) as RValue) };
+        break;
+      }
+      case "HELLO":
+        value = {
+          t: "map",
+          v: [
+            [str("server"), str("redis")],
+            [str("version"), str("7.2.4")],
+            [str("proto"), { t: "int", v: 3 }],
+            [str("mode"), str("standalone")],
+            [str("modules"), { t: "arr", v: [{ t: "map", v: [[str("name"), str("ReJSON")], [str("ver"), { t: "int", v: 20609 }]] }] }],
+          ],
+        };
+        break;
+      case "SMISMEMBER":
+        value = { t: "arr", v: args.slice(1).map((_, i) => ({ t: "bool", v: i % 2 === 0 }) as RValue) };
+        break;
+      case "INFO":
+        value = str(fakeInfo());
+        break;
+      case "CLIENT":
+        value = (args[0] ?? "").toUpperCase() === "LIST" ? str(fakeClients()) : { t: "status", v: "OK" };
+        break;
+      case "CONFIG": {
+        const matcher = compileMatcher({ mode: "glob", term: args[1] ?? "*", caseSensitive: false });
+        value = { t: "arr", v: mockConfig.filter((c) => matcher.test(c.name)).flatMap((c) => [str(c.name), str(c.value)]) };
+        break;
+      }
+      case "FLUSHDB":
+        store.clear();
+        value = { t: "status", v: "OK" };
+        break;
+      case "PUBLISH":
+        value = { t: "int", v: mockPublish(connectionId, args[0] ?? "", args[1] ?? "") };
+        break;
+      case "DEBUG":
+        if ((args[0] ?? "").toUpperCase() === "SLEEP") await delay(Number(args[1] ?? 0) * 1000);
+        value = { t: "status", v: "OK" };
+        break;
       default:
         value = { t: "err", v: `ERR unknown command '${cmd}', with args beginning with: (sahte arka uç)` };
     }
     await delay(5);
     return { value, db: dbIndex, elapsedMs: performance.now() - started };
   },
-  pubsub_subscribe: async ({ subId, channels }, emit) => {
+  pubsub_subscribe: async ({ connectionId, subId, channels, patterns }, emit) => {
+    mockSubs.set(subId, { connectionId, channels, patterns, emit: emit! });
     let n = 0;
-    while (!cancelled.has(subId) && n < 1000) {
-      await delay(1200);
-      emit?.({ channel: channels[0] ?? "news", pattern: "", payload: JSON.stringify({ n: n++, at: new Date().toISOString() }), atMs: Date.now() });
+    const words = ["tr", "eu", "web", "mobile"];
+    try {
+      while (!cancelled.has(subId) && n < 1000) {
+        await delay(1200);
+        if (cancelled.has(subId)) break;
+        const targets: [string, string][] = [
+          ...channels.map((c: string): [string, string] => [c, ""]),
+          ...patterns.map((p: string): [string, string] => [p.replace(/[*?]/g, words[n % words.length]).replace(/\[[^\]]*\]/g, "x"), p]),
+        ];
+        const [channel, pattern] = targets[n % Math.max(1, targets.length)] ?? ["news", ""];
+        const payload = n % 5 === 4 ? `düz metin mesajı #${n}` : JSON.stringify({ n, at: new Date().toISOString(), user: { id: n * 7, city: "İstanbul" }, tags: ["a", "b"] });
+        emit?.({ channel, pattern, payload, atMs: Date.now() });
+        n++;
+      }
+    } finally {
+      mockSubs.delete(subId);
     }
   },
   monitor_start: async ({ subId }, emit) => {
-    while (!cancelled.has(subId)) {
-      await delay(900);
-      emit?.(`${(Date.now() / 1000).toFixed(6)} [0 127.0.0.1:52144] "GET" "user:${Math.floor(Math.random() * 999)}"`);
+    mockMonitors.set(subId, (line) => emit?.(line));
+    try {
+      while (!cancelled.has(subId)) {
+        await delay(900);
+        if (cancelled.has(subId)) break;
+        emit?.(`${(Date.now() / 1000).toFixed(6)} [0 127.0.0.1:52144] "GET" "user:${Math.floor(Math.random() * 999)}"`);
+      }
+    } finally {
+      mockMonitors.delete(subId);
     }
   },
   subscription_stop: ({ subId }) => void cancelled.add(subId),
 
   server_info: () => fakeInfo(),
-  server_slowlog: () =>
-    Array.from({ length: 12 }, (_, i) => ({ id: 120 - i, timestamp: Math.floor(Date.now() / 1000) - i * 97, durationUs: 15000 + i * 3100, args: ["KEYS", `cache:*:${i}`], client: "10.0.0.5:51234", clientName: i % 2 ? "worker" : "" })),
+  server_slowlog: ({ count }) =>
+    Array.from({ length: Math.min(count ?? 128, 40) }, (_, i) => ({
+      id: 120 - i,
+      timestamp: Math.floor(Date.now() / 1000) - i * 977,
+      durationUs: [420, 2_300, 15_000, 87_000, 240_000, 1_250_000][i % 6] + i * 37,
+      args:
+        i % 4 === 0
+          ? ["KEYS", `cache:*:${i}`]
+          : i % 4 === 1
+            ? ["HGETALL", `user:${i * 9}`]
+            : i % 4 === 2
+              ? ["EVAL", "local n = 0 for i = 1, 100000 do n = n + i end return n -- uzun bir betik metni ipucunda tam görünür", "0"]
+              : ["ZRANGEBYSCORE", "leaderboard:season:3", "-inf", "+inf", "WITHSCORES"],
+      client: i % 3 ? "10.0.0.5:51234" : "127.0.0.1:52144",
+      clientName: i % 2 ? "worker" : "",
+    })),
   server_slowlog_reset: () => undefined,
-  server_clients: () => "id=3 addr=127.0.0.1:52144 laddr=127.0.0.1:6379 fd=8 name= age=120 idle=0 flags=N db=0 cmd=client|list\nid=4 addr=10.0.0.5:51234 laddr=127.0.0.1:6379 fd=9 name=worker age=3600 idle=2 flags=N db=0 cmd=get",
-  server_config: () => [
-    { name: "maxmemory", value: "2147483648" },
-    { name: "maxmemory-policy", value: "allkeys-lru" },
-    { name: "databases", value: "16" },
-    { name: "timeout", value: "0" },
-  ],
-  server_config_set: () => undefined,
+  server_clients: () => fakeClients(),
+  server_config: ({ pattern }) => {
+    const matcher = compileMatcher({ mode: "glob", term: pattern || "*", caseSensitive: false });
+    return mockConfig.filter((c) => matcher.test(c.name));
+  },
+  server_config_set: ({ name, value }) => {
+    const item = mockConfig.find((c) => c.name === name) ?? fail("redis", `ERR Unknown option or number of arguments for CONFIG SET - '${name}'`);
+    item.value = value;
+  },
 
   bulk_start: async ({ spec, jobId }, emit) => runBulk(spec, jobId, emit!),
   bulk_import: async ({ jobId }, emit) => {
@@ -428,9 +613,23 @@ const handlers: Record<string, Handler> = {
   },
   ardm_read_file: async () => ardmSample(),
 
-  codec_decode: ({ data }) => data,
-  codec_encode: ({ data }) => data,
+  // Tarayıcının CompressionStream API'si; brotli desteklenmediğinden olduğu gibi döner
+  codec_decode: ({ data, format }) => mockCodec(data, format, false),
+  codec_encode: ({ data, format }) => mockCodec(data, format, true),
 };
+
+const STREAM_FORMATS: Record<string, CompressionFormat> = { gzip: "gzip", deflate: "deflate-raw", zlib: "deflate" };
+
+async function mockCodec(data: RBytes, format: string, encode: boolean): Promise<RBytes> {
+  const kind = STREAM_FORMATS[format];
+  if (!kind) return data;
+  try {
+    const stream = new Blob([toBytes(data) as BlobPart]).stream().pipeThrough(encode ? new CompressionStream(kind) : new DecompressionStream(kind));
+    return fromBytes(new Uint8Array(await new Response(stream).arrayBuffer()));
+  } catch (err) {
+    return fail("invalid", `cannot ${encode ? "encode" : "decode"}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 function ardmSample(): ImportCandidate[] {
   const make = (name: string, host: string, port: number, patch: Partial<ConnectionConfig> = {}) => ({ ...conn("", name, host, port, { env: "none", group: "" }), importedFrom: "ardm", ...patch });
@@ -443,61 +642,130 @@ function ardmSample(): ImportCandidate[] {
 }
 
 async function runBulk(spec: BulkSpec, jobId: string, emit: (e: unknown) => void) {
+  // Arka ucun davranışını taklit eder: süzgeçte önce tarama (toplam bilinmez), notlar (exists/duplicate/unchanged/
+  // binary/hasTtl), kuru çalıştırmada ilk 500 örnek, adında "locked" geçen anahtarlarda hata.
   const started = Date.now();
   const store = db(spec.connectionId, spec.db);
-  let keys: RBytes[];
+  const action: BulkAction = spec.action;
+  let keys: RBytes[] = [];
   let scanned = 0;
   if (spec.source.kind === "keys") keys = spec.source.keys;
   else {
     const filter = spec.source.filter;
     const matcher = compileMatcher(filter);
-    keys = [...store.values()].filter((e) => (filter.types.length === 0 || filter.types.includes(e.type)) && matcher.test(textOf(e.key))).map((e) => e.key);
-    scanned = store.size;
+    const all = [...store.values()];
+    for (let i = 0; i < all.length && !cancelled.has(jobId); i += 2000) {
+      for (const e of all.slice(i, i + 2000)) {
+        if ((filter.types.length === 0 || filter.types.includes(e.type)) && matcher.test(textOf(e.key))) keys.push(e.key);
+      }
+      scanned = Math.min(all.length, i + 2000);
+      emit({ kind: "progress", scanned, matched: keys.length, processed: 0, succeeded: 0, failed: 0, skipped: 0, total: null });
+      await delay(12);
+    }
   }
-  const total = keys.length;
+  const total = spec.source.kind === "keys" ? keys.length : null;
+  if (spec.source.kind === "keys") scanned = keys.length;
+  const plans = action.kind === "rename" ? planRenames(store, keys, action) : null;
+  const target = action.kind === "copy" ? db(action.targetConnectionId || spec.connectionId, action.targetDb) : null;
   let processed = 0;
   let succeeded = 0;
   let skipped = 0;
-  const samples = [];
-  for (const key of keys) {
-    if (cancelled.has(jobId)) break;
+  let failed = 0;
+  let sampled = 0;
+  let samples: { key: RBytes; newKey: RBytes | null; note: string }[] = [];
+  const progress = () => emit({ kind: "progress", scanned, matched: keys.length, processed, succeeded, failed, skipped, total });
+  for (let i = 0; i < keys.length && !cancelled.has(jobId); i++) {
+    const key = keys[i];
+    const id = bytesId(key);
+    const e = live(store, id);
     processed++;
-    const action: BulkAction = spec.action;
-    const newKey = action.kind === "rename" ? renamed(textOf(key), action) : null;
+    let note = plans ? plans[i].note : "";
+    const newKey = plans ? plans[i].newKey : null;
+    if (action.kind === "expire" && action.onlyWithoutTtl && action.ttlMs > 0 && e && e.expireAt !== -1) note = "hasTtl";
+    if (target && action.kind === "copy" && !action.replace && live(target, id)) note = "exists";
     if (spec.dryRun) {
-      if (samples.length < 500) samples.push({ key, newKey, note: newKey === textOf(key) ? "unchanged" : "" });
-    } else if (action.kind === "delete") {
-      store.delete(bytesId(key));
-    } else if (action.kind === "expire") {
-      const e = live(store, bytesId(key));
-      if (e) e.expireAt = action.ttlMs > 0 ? Date.now() + action.ttlMs : -1;
-    } else if (action.kind === "rename" && newKey && newKey !== textOf(key)) {
-      const e = live(store, bytesId(key));
-      if (e) {
-        store.delete(bytesId(key));
-        store.set(newKey, { ...e, key: newKey });
+      if (note) skipped++;
+      if (sampled < 500) {
+        sampled++;
+        samples.push({ key, newKey, note });
+        if (samples.length >= 100) {
+          emit({ kind: "sample", items: samples });
+          samples = [];
+        }
       }
-    } else if (action.kind === "rename") skipped++;
-    succeeded++;
-    if (processed % 200 === 0) {
-      emit({ kind: "progress", scanned, matched: total, processed, succeeded, failed: 0, skipped, total });
-      await delay(30);
+    } else if (note || !e) {
+      skipped++;
+    } else if (textOf(key).includes("locked")) {
+      failed++;
+      emit({ kind: "error", key, message: "BUSYKEY Target key name is locked (sahte arka uç)" });
+    } else {
+      if (action.kind === "delete") store.delete(id);
+      else if (action.kind === "expire") e.expireAt = action.ttlMs > 0 ? Date.now() + action.ttlMs : -1;
+      else if (action.kind === "rename" && newKey !== null) {
+        store.delete(id);
+        store.set(bytesId(newKey), { ...e, key: newKey });
+      } else if (action.kind === "copy" && target) {
+        target.set(id, structuredClone(e));
+        if (action.moveKeys) store.delete(id);
+      }
+      succeeded++;
+    }
+    if (processed % 250 === 0) {
+      progress();
+      await delay(20);
     }
   }
   if (samples.length) emit({ kind: "sample", items: samples });
-  emit({ kind: "progress", scanned, matched: total, processed, succeeded, failed: 0, skipped, total });
-  const summary = { scanned, matched: total, succeeded: spec.dryRun ? 0 : succeeded - skipped, failed: 0, skipped, elapsedMs: Date.now() - started, cancelled: cancelled.has(jobId), dryRun: spec.dryRun, outputPath: spec.action.kind === "export" ? spec.action.path : "" };
+  progress();
+  const summary = { scanned, matched: keys.length, succeeded, failed, skipped, elapsedMs: Date.now() - started, cancelled: cancelled.has(jobId), dryRun: spec.dryRun, outputPath: action.kind === "export" && !spec.dryRun ? action.path : "" };
   emit({ kind: "done", summary });
   return summary;
 }
 
+/** Arka uçtaki rename::plan gibi: ikili, değişmeyen, aynı hedefe giden, hedefi dolu olanlar not alır */
+function planRenames(store: Map<string, Entry>, keys: RBytes[], action: Extract<BulkAction, { kind: "rename" }>) {
+  const plans = keys.map((key) => {
+    if (typeof key !== "string") return { newKey: null as RBytes | null, note: "binary" };
+    const next = renamed(key, action);
+    return next === key ? { newKey: null, note: "unchanged" } : { newKey: next as RBytes | null, note: "" };
+  });
+  const perTarget = new Map<string, number>();
+  for (const p of plans) if (p.newKey !== null) perTarget.set(p.newKey as string, (perTarget.get(p.newKey as string) ?? 0) + 1);
+  for (const p of plans) if (p.newKey !== null && (perTarget.get(p.newKey as string) ?? 0) > 1) p.note = "duplicate";
+  const moving = new Set(keys.filter((_, i) => plans[i].note === "").map(bytesId));
+  for (const p of plans) {
+    if (p.note || p.newKey === null) continue;
+    if (moving.has(p.newKey as string) || (!action.overwrite && live(store, p.newKey as string))) p.note = "exists";
+  }
+  return plans;
+}
+
+/** Bul/değiştir; duyarsızken Türkçe İ/ı → i katlaması (UTF-16 uzunluğu korunur, konumlar özgün metne uyar) */
 function renamed(key: string, action: Extract<BulkAction, { kind: "rename" }>): string {
-  const source = action.regex ? action.find : action.find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const fold = (s: string) => (action.caseSensitive ? s : s.replace(/[İı]/g, "i"));
+  const source = fold(action.regex ? action.find.replace(/\(\?P</g, "(?<") : action.find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  let re: RegExp;
   try {
-    return key.replace(new RegExp(source, action.caseSensitive ? "g" : "gi"), action.replace);
+    re = new RegExp(source, action.caseSensitive ? "gd" : "gid");
   } catch {
     return key;
   }
+  const hay = fold(key);
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(hay)) !== null) {
+    const match = m;
+    out += key.slice(last, match.index);
+    const group = (name: string) => {
+      const span = /^\d+$/.test(name) ? match.indices?.[Number(name)] : match.indices?.groups?.[name];
+      return span ? key.slice(span[0], span[1]) : "";
+    };
+    out += action.regex ? action.replace.replace(/\$(\$|\{(\w+)\}|(\w+))/g, (_, all: string, braced?: string, bare?: string) => (all === "$" ? "$" : group(braced ?? bare ?? ""))) : action.replace;
+    last = match.index + match[0].length;
+    if (match[0].length === 0) re.lastIndex++;
+  }
+  return out + key.slice(last);
 }
 
 function fakeInfo(): string {

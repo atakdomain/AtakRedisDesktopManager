@@ -121,6 +121,9 @@ export const api = {
     remove: (connectionId: Cid, db: number, keys: RBytes[]) => call<number>("key_delete", { connectionId, db, keys }),
     rename: (connectionId: Cid, db: number, key: RBytes, newKey: RBytes, overwrite: boolean) =>
       call<void>("key_rename", { connectionId, db, key, newKey, overwrite }),
+    /** Aynı veritabanında yeni ada kopya, TTL korunur. Hedef varsa ve overwrite yoksa `exists` hatası */
+    copy: (connectionId: Cid, db: number, key: RBytes, newKey: RBytes, overwrite: boolean) =>
+      call<void>("key_copy", { connectionId, db, key, newKey, overwrite }),
     /** `ttlMs` <= 0 → PERSIST */
     expire: (connectionId: Cid, db: number, key: RBytes, ttlMs: number) => call<void>("key_expire", { connectionId, db, key, ttlMs }),
   },
