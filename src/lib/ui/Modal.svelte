@@ -96,6 +96,11 @@
     animation: rise 160ms var(--ease);
   }
 
+  /* Panel yalnızca odak tuzağı için odaklanır; çerçeve göstermez */
+  .panel:focus-visible {
+    outline: none;
+  }
+
   @keyframes rise {
     from {
       opacity: 0;
