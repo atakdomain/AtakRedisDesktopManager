@@ -1,6 +1,6 @@
 // Komut kaydı: komut paleti (Ctrl+K) ve klavye kısayolları aynı listeden beslenir.
 // Özellikler kendi komutlarını bileşen ömrü boyunca `useCommands([...])` ile kaydeder.
-import type { Component } from "svelte";
+import { untrack, type Component } from "svelte";
 
 export interface Command {
   id: string;
@@ -38,7 +38,8 @@ export function registerCommands(commands: Command[]): () => void {
 
 /** Bileşen içinde: bağlanınca kaydeder, yok olunca siler. */
 export function useCommands(commands: Command[]): void {
-  $effect(() => registerCommands(commands));
+  // registry hem okunur hem yazılır; izlenirse effect kendini sonsuza dek tetikler
+  $effect(() => untrack(() => registerCommands(commands)));
 }
 
 function eventCombo(e: KeyboardEvent): string {

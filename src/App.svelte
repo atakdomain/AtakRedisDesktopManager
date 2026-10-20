@@ -12,7 +12,7 @@
   import Unplug from "@lucide/svelte/icons/unplug";
   import Settings from "@lucide/svelte/icons/settings";
   import KeyRound from "@lucide/svelte/icons/key-round";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import KeyBrowser from "$lib/features/browser/KeyBrowser.svelte";
   import ConnectionEditor from "$lib/features/connections/ConnectionEditor.svelte";
   import ConnectionRail from "$lib/features/connections/ConnectionRail.svelte";
@@ -62,7 +62,8 @@
   const ws = $derived(activeId && status === "connected" ? workspaceFor(activeId) : null);
 
   $effect(() => {
-    if (ws) void ws.init();
+    const current = ws;
+    if (current) untrack(() => void current.init());
   });
 
   const hasWs = () => ws !== null;
