@@ -83,7 +83,8 @@
   {:else}
     <div class="spacer" style:height="{count * rowHeight}px">
       <div class="window" style:transform="translateY({start * rowHeight}px)">
-        {#each indexes as index (index)}
+        <!-- Anahtarsız: kaydırırken satır DOM'u yeniden kullanılır, yalnızca prop'lar güncellenir -->
+        {#each indexes as index}
           {@render row(index)}
         {/each}
       </div>

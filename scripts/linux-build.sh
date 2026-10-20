@@ -7,6 +7,7 @@ MODE="${1:-check}"
 export PATH="/root/.bun/bin:/root/.cargo/bin:$(ls -d /opt/node-*/bin | head -1):$PATH"
 export APPIMAGE_EXTRACT_AND_RUN=1
 
+command -v unzip >/dev/null || apt-get install -y -qq unzip >/dev/null
 if ! command -v bun >/dev/null; then
   curl -fsSL https://bun.sh/install | bash >/dev/null
 fi

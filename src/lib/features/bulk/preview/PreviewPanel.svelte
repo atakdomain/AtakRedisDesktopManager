@@ -16,6 +16,8 @@
   const fresh = $derived(flow.previewFresh);
   const mapping = $derived(flow.draft.action === "rename");
   const counts = $derived(noteCounts(preview.samples));
+  /** Değişecek anahtar sayısı: önizleme bittiyse tüm eşleşmeden, sürerken örneklerden */
+  const changing = $derived(fresh && !preview.running && flow.count !== null ? flow.count - preview.skipped : counts[""]);
   const NOTES: Exclude<BulkNote, "">[] = ["exists", "duplicate", "unchanged", "hasTtl", "binary"];
   /** Önizlemeden önce gösterilecek engel (eşleşme yokluğu sayıyla birlikte ayrıca gösterilir) */
   const issue = $derived(flow.issue && flow.issue.code !== "noMatches" ? flow.blocker : null);
@@ -55,7 +57,7 @@
   {#if flow.needsPreview && preview.samples.length > 0 && (fresh || preview.running)}
     {#if mapping || counts.exists + counts.duplicate + counts.unchanged + counts.hasTtl + counts.binary > 0}
       <div class="notes tabular">
-        {#if mapping}<span class="note ok">{t("bulk.preview.notes.ok")} {fmtNumber(counts[""])}</span>{/if}
+        {#if mapping}<span class="note ok">{t("bulk.preview.notes.ok")} {fmtNumber(changing)}</span>{/if}
         {#each NOTES as note (note)}
           {#if counts[note] > 0}
             <span class="note {note}" use:tooltip={t(`bulk.preview.noteHints.${note}`)}>{t(`bulk.preview.notes.${note}`)} {fmtNumber(counts[note])}</span>

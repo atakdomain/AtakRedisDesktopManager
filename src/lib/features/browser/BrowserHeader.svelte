@@ -15,7 +15,7 @@
   import { openBulkTab, openImport } from "$lib/features/bulk/state.svelte";
   import { fmtNumber, t } from "$lib/i18n/index.svelte";
   import { connections } from "$lib/state/connections.svelte";
-  import { openMenu, type MenuItem } from "$lib/state/menu.svelte";
+  import { menu, openMenu, type MenuItem } from "$lib/state/menu.svelte";
   import { settings } from "$lib/state/settings.svelte";
   import type { Workspace } from "$lib/state/workspace.svelte";
   import { tooltip } from "$lib/ui/tooltip.svelte";
@@ -28,9 +28,16 @@
   const cluster = $derived(connections.sessions[ws.connectionId]?.mode === "cluster");
   const current = $derived(ws.dbs.find((d) => d.index === ws.db));
 
-  function dbMenu(showAll = false): void {
+  /** Menü önbellekteki sayılarla hemen açılır; taze sayılar gelince (değiştiyse) yerinde yenilenir */
+  async function dbMenu(showAll = false): Promise<void> {
     if (!dbButton) return;
-    void ws.loadDbs();
+    showDbMenu(dbButton, showAll);
+    const before = JSON.stringify(ws.dbs);
+    await ws.loadDbs();
+    if (menu.current?.anchor === dbButton && JSON.stringify(ws.dbs) !== before) showDbMenu(dbButton, showAll);
+  }
+
+  function showDbMenu(anchor: HTMLElement, showAll: boolean): void {
     const visible = showAll ? ws.dbs : ws.dbs.filter((d) => d.keys > 0 || d.index === ws.db);
     const items: MenuItem[] = [
       { kind: "header", label: t("browser.header.dbMenu") },
@@ -42,9 +49,9 @@
       })),
     ];
     if (!showAll && visible.length < ws.dbs.length) {
-      items.push({ kind: "separator" }, { label: t("browser.header.showAllDbs", { count: ws.dbs.length }), run: () => dbMenu(true) });
+      items.push({ kind: "separator" }, { label: t("browser.header.showAllDbs", { count: ws.dbs.length }), run: () => void dbMenu(true) });
     }
-    openMenu(items, dbButton, { minWidth: 200 });
+    openMenu(items, anchor, { minWidth: 200 });
   }
 
   function moreMenu(e: MouseEvent): void {
