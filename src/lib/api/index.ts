@@ -55,7 +55,8 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 let transportPromise: Promise<Transport> | null = null;
 
 function transport(): Promise<Transport> {
-  transportPromise ??= inTauri ? import("./tauri").then((m) => m.tauriTransport) : import("./mock").then((m) => m.mockTransport);
+  // Üretim derlemesinde DEV sabit false olduğundan sahte arka uç pakete girmez
+  transportPromise ??= import.meta.env.DEV && !inTauri ? import("./mock").then((m) => m.mockTransport) : import("./tauri").then((m) => m.tauriTransport);
   return transportPromise;
 }
 
