@@ -71,10 +71,14 @@ gen_tls() {
     printf "subjectAltName=DNS:localhost,IP:127.0.0.1\n" > "$d/server.ext"
     openssl x509 -req -in "$d/server.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" -CAcreateserial \
       -days 3650 -sha256 -extfile "$d/server.ext" -out "$d/server.crt" 2>/dev/null
+  fi
+  # client.ext: X.509 v3 is required by rustls/webpki for client certificates
+  if [ ! -f "$d/client.ext" ]; then
+    printf "basicConstraints=CA:FALSE\nextendedKeyUsage=clientAuth\n" > "$d/client.ext"
     openssl genrsa -out "$d/client.key" 2048 2>/dev/null
     openssl req -new -key "$d/client.key" -subj "/CN=ardm-client" -out "$d/client.csr"
     openssl x509 -req -in "$d/client.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" -CAcreateserial \
-      -days 3650 -sha256 -out "$d/client.crt" 2>/dev/null
+      -days 3650 -sha256 -extfile "$d/client.ext" -out "$d/client.crt" 2>/dev/null
   fi
   mkdir -p "$OUT"
   cp "$d/ca.crt" "$d/client.crt" "$d/client.key" "$OUT/"

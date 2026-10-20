@@ -1,5 +1,4 @@
-//! Tauri komutları. Her dosyanın sahibi tek bir ajandır (bkz. docs/architecture.md).
-use crate::error::{AppError, AppResult};
+//! Tauri komutları: ince sarmalayıcılar; iş mantığı session/scan/bulk/import modüllerinde.
 
 pub mod app;
 pub mod bulk;
@@ -12,8 +11,3 @@ pub mod scan;
 pub mod server;
 pub mod sessions;
 pub mod values;
-
-/// İskelet gövdesi; gerçek uygulama gelince kaldırılır.
-pub(crate) fn not_implemented<T>() -> AppResult<T> {
-    Err(AppError::internal("not implemented"))
-}

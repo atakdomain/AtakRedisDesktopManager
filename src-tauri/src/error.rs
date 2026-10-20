@@ -59,12 +59,20 @@ impl AppError {
     pub fn read_only() -> Self {
         Self::new(ErrorKind::ReadOnly, "connection is read-only")
     }
+
+    pub fn exists(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Exists, message)
+    }
+
+    pub fn connection(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Connection, message)
+    }
 }
 
 impl From<redis::RedisError> for AppError {
     fn from(err: redis::RedisError) -> Self {
         let code = err.code().unwrap_or_default();
-        let kind = if matches!(code, "NOAUTH" | "WRONGPASS" | "NOPERM") {
+        let kind = if matches!(code, "NOAUTH" | "WRONGPASS" | "NOPERM") || err.kind() == redis::ErrorKind::AuthenticationFailed {
             ErrorKind::Auth
         } else if err.is_timeout() {
             ErrorKind::Timeout
@@ -73,7 +81,24 @@ impl From<redis::RedisError> for AppError {
         } else {
             ErrorKind::Redis
         };
-        AppError::new(kind, err.to_string())
+        // Sunucu hatası redis-cli gibi görünsün: "WRONGTYPE Operation against …"
+        let message = match (err.kind(), err.code(), err.detail()) {
+            (redis::ErrorKind::Server(_) | redis::ErrorKind::Extension, Some(code), Some(detail)) => format!("{code} {detail}"),
+            _ => err.to_string(),
+        };
+        AppError::new(kind, message)
+    }
+}
+
+impl From<redis::ServerError> for AppError {
+    fn from(err: redis::ServerError) -> Self {
+        redis::RedisError::from(err).into()
+    }
+}
+
+impl From<redis::ParsingError> for AppError {
+    fn from(err: redis::ParsingError) -> Self {
+        AppError::new(ErrorKind::Redis, format!("unexpected reply: {err}"))
     }
 }
 
