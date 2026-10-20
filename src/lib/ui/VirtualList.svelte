@@ -70,7 +70,7 @@
 <div
   class="viewport"
   bind:this={viewport}
-  onscroll={() => (scrollTop = viewport!.scrollTop)}
+  onscroll={(e) => (scrollTop = (e.currentTarget as HTMLDivElement).scrollTop)}
   {tabindex}
   {onkeydown}
   {onfocus}

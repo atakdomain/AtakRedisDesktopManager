@@ -67,11 +67,14 @@ Sentinel: sentinel düğümüne bağlan, `SENTINEL get-master-addr-by-name`, mas
 | prefix | `terim*` |
 | exact | kaçışlı terim; büyük/küçük duyarlıysa `EXISTS` kısayolu |
 | glob | olduğu gibi |
-| regex | `*` + istemci tarafı `regex` süzgeci |
+| regex | `*` + istemci tarafı `regex` süzgeci; duyarlı ve `^sabit` ile başlayıp `\|` içermiyorsa `sabit*` |
 
-Büyük/küçük harf duyarsızken ASCII harfler `[aA]` sınıfına çevrilir — süzme sunucuda kalır, hızlıdır. ASCII
-dışı harf varsa (ş, İ, ı …) o harf sunucu deseninde `*`'a genişler ve istemci tarafında Unicode küçük harfe
-çevirerek (Türkçe İ/ı/I → i) kesin doğrulama yapılır. Aynı derleyici hash/set/zset alan süzgecinde de kullanılır.
+Büyük/küçük harf duyarsızken ASCII harfler `[aA]` sınıfına çevrilir — süzme sunucuda kalır, hızlıdır. Bayt bayt
+ifade edilemeyenler (i/I, ASCII dışı harfler ş/İ/ı…, `?`, i ya da ASCII dışı harf içeren sınıflar, olumsuz
+sınıflar) sunucu deseninde `?*`'a genişler; istemci tarafında Unicode küçük harfe çevirerek (Türkçe İ/ı/I → i)
+kesin doğrulama yapılır. Duyarsızken `?` bir *karakter* eşler (bayt değil). Sunucu deseni hiçbir zaman istemci
+eşleşmesinden dar değildir (birim testi + gerçek sunucuyla karşılaştırma). Aynı derleyici hash/set/zset alan
+süzgecinde de kullanılır.
 
 ## Ön yüz
 
