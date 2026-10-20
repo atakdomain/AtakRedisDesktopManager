@@ -165,34 +165,40 @@ export class Workspace {
 
   private async runScan(cursor: string, limit: number): Promise<void> {
     const scanId = uid();
+    const generation = this.generation;
+    const current = () => generation === this.generation;
     this.scanId = scanId;
     this.scan.running = true;
     this.scan.error = null;
     const started = performance.now();
     const baseScanned = this.scan.scanned;
+    let received = 0;
     let pending: RBytes[] = [];
     let frame = 0;
     const flush = () => {
       frame = 0;
-      if (this.scanId !== scanId || pending.length === 0) return;
+      if (!current() || pending.length === 0) return;
       this.appendKeys(pending);
       pending = [];
     };
     try {
       const result = await api.keys.scan(this.connectionId, this.db, $state.snapshot(this.filter), cursor, limit, scanId, (batch) => {
-        if (this.scanId !== scanId) return;
+        if (!current()) return;
+        received += batch.keys.length;
         pending.push(...batch.keys);
-        this.scan.scanned = baseScanned + batch.scanned;
+        this.scan.scanned = Math.max(this.scan.scanned, baseScanned + batch.scanned);
         frame ||= requestAnimationFrame(flush);
       });
-      if (this.scanId !== scanId) return;
+      // Kanal mesajları komutun yanıtından sonra da gelebilir; bu çağrının tüm parçaları gelene dek kısa süre bekle
+      await waitFor(() => received >= result.matched || !current(), 2000);
+      if (!current()) return;
       cancelAnimationFrame(frame);
       flush();
       this.scan.cursor = result.cursor;
       this.scan.done = result.done;
       this.scan.scanned = baseScanned + result.scanned;
     } catch (err) {
-      if (this.scanId !== scanId) return;
+      if (!current()) return;
       flush();
       if (!(err instanceof ApiError && err.kind === "cancelled")) {
         this.scan.error = err instanceof ApiError ? err : new ApiError("internal", String(err));
@@ -401,6 +407,15 @@ export class Workspace {
   }
 }
 
+
+function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
+  if (condition()) return Promise.resolve();
+  const deadline = performance.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const tick = () => (condition() || performance.now() > deadline ? resolve() : setTimeout(tick, 16));
+    tick();
+  });
+}
 
 export function keyTabId(key: RBytes): string {
   return `key:${bytesId(key)}`;
