@@ -14,7 +14,10 @@ let owner: HTMLElement | null = null;
 function hide(): void {
   clearTimeout(timer);
   owner = null;
-  tooltipState.content = null;
+  // Öğe şablon güncellemesi sırasında kaldırılırken çağrılabilir; durum yazımı sonraya ertelenir
+  queueMicrotask(() => {
+    if (owner === null) tooltipState.content = null;
+  });
 }
 
 export const tooltip: Action<HTMLElement, string | TooltipContent | undefined | null> = (node, initial) => {
