@@ -24,7 +24,7 @@
   --ease: cubic-bezier(0.2, 0, 0, 1);
   --dur: 120ms;
 
-  --z-popover: 50;
+  --z-popover: 150;
   --z-modal: 100;
   --z-toast: 200;
   --z-tooltip: 300;
